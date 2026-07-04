@@ -141,6 +141,7 @@ def run_generation_job(job_id, prompt, duration, orientation):
             sources=sources,
         )
     except ClipMergeError as exc:
+        app.logger.exception("Generation job %s failed with ClipMergeError", job_id)
         update_job(
             job_id,
             state="error",
@@ -149,6 +150,7 @@ def run_generation_job(job_id, prompt, duration, orientation):
             detail=exc.detail,
         )
     except Exception as exc:
+        app.logger.exception("Generation job %s failed with an unexpected exception", job_id)
         update_job(
             job_id,
             state="error",
@@ -206,85 +208,101 @@ def about_js():
 
 @app.route("/api/generate", methods=["POST"])
 def generate():
-    cleanup_old_jobs()
-    data = request.get_json(silent=True) or {}
-
     try:
-        prompt, duration, orientation = validate_payload(data)
-    except ClipMergeError as exc:
-        return jsonify({"error": exc.message}), 400
+        cleanup_old_jobs()
+        data = request.get_json(silent=True) or {}
 
-    if not api_key():
-        return jsonify({"error": "Missing Pexels API key. Add it to .env as PEXELS_API_KEY."}), 400
+        try:
+            prompt, duration, orientation = validate_payload(data)
+        except ClipMergeError as exc:
+            return jsonify({"error": exc.message}), 400
 
-    if not VideoBuilder.ffmpeg_available():
-        return jsonify({"error": "FFmpeg is not installed or is not available on PATH."}), 400
+        if not api_key():
+            return jsonify({"error": "Missing Pexels API key. Add it to .env as PEXELS_API_KEY."}), 400
 
-    job_id = uuid.uuid4().hex
-    job = {
-        "job_id": job_id,
-        "state": "running",
-        "status": "Generating keywords...",
-        "progress": 3,
-        "created_at": time.time(),
-        "updated_at": time.time(),
-        "orientation": orientation,
-        "fallback_used": False,
-        "keywords": [],
-        "sources": [],
-    }
+        if not VideoBuilder.ffmpeg_available():
+            return jsonify({"error": "FFmpeg is not installed or is not available on PATH."}), 400
 
-    with jobs_lock:
-        jobs[job_id] = job
+        job_id = uuid.uuid4().hex
+        job = {
+            "job_id": job_id,
+            "state": "running",
+            "status": "Generating keywords...",
+            "progress": 3,
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "orientation": orientation,
+            "fallback_used": False,
+            "keywords": [],
+            "sources": [],
+        }
 
-    thread = threading.Thread(
-        target=run_generation_job,
-        args=(job_id, prompt, duration, orientation),
-        daemon=True,
-    )
-    thread.start()
+        with jobs_lock:
+            jobs[job_id] = job
 
-    return jsonify(public_job(job)), 202
+        thread = threading.Thread(
+            target=run_generation_job,
+            args=(job_id, prompt, duration, orientation),
+            daemon=True,
+        )
+        thread.start()
+
+        return jsonify(public_job(job)), 202
+    except Exception:
+        app.logger.exception("Failed to start generation job")
+        return jsonify({"error": "An unexpected error occurred while starting video generation."}), 500
 
 
 @app.route("/api/status/<job_id>")
 def job_status(job_id):
-    with jobs_lock:
-        job = jobs.get(job_id)
+    try:
+        with jobs_lock:
+            job = jobs.get(job_id)
 
-    if not job:
-        return jsonify({"error": "Generation job was not found."}), 404
+        if not job:
+            return jsonify({"error": "Generation job was not found."}), 404
 
-    return jsonify(public_job(job))
+        return jsonify(public_job(job))
+    except Exception:
+        app.logger.exception("Failed to retrieve status for job %s", job_id)
+        return jsonify({"error": "An unexpected error occurred while retrieving the job status."}), 500
 
 
 @app.route("/api/download/<job_id>")
 def download(job_id):
-    with jobs_lock:
-        job = jobs.get(job_id)
+    try:
+        with jobs_lock:
+            job = jobs.get(job_id)
 
-    if not job or job.get("state") != "finished" or not job.get("output_path"):
-        return jsonify({"error": "The requested video is not ready for download."}), 404
+        if not job or job.get("state") != "finished" or not job.get("output_path"):
+            return jsonify({"error": "The requested video is not ready for download."}), 404
 
-    output_path = Path(job["output_path"])
-    if not output_path.exists():
-        return jsonify({"error": "The generated MP4 is no longer available."}), 404
+        output_path = Path(job["output_path"])
+        if not output_path.exists():
+            return jsonify({"error": "The generated MP4 is no longer available."}), 404
 
-    return send_file(
-        output_path,
-        mimetype="video/mp4",
-        as_attachment=True,
-        download_name=output_path.name,
-    )
+        return send_file(
+            output_path,
+            mimetype="video/mp4",
+            as_attachment=True,
+            download_name=output_path.name,
+        )
+    except Exception:
+        app.logger.exception("Failed to download output for job %s", job_id)
+        return jsonify({"error": "An unexpected error occurred while preparing the download."}), 500
 
 
 @app.route("/api/health")
 def health():
-    return jsonify({
-        "ok": True,
-        "pexels_api_key": bool(api_key()),
-        "ffmpeg": VideoBuilder.ffmpeg_available(),
-    })
+    try:
+        return jsonify({
+            "ok": True,
+            "pexels_api_key": bool(api_key()),
+            "ffmpeg": VideoBuilder.ffmpeg_available(),
+        })
+    except Exception:
+        app.logger.exception("Health check failed")
+        return jsonify({"error": "Health check failed."}), 500
 
 
 if __name__ == "__main__":
