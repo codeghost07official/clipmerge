@@ -1,3 +1,4 @@
+import gc
 import logging
 import math
 import random
@@ -15,21 +16,21 @@ from keyword_engine import prompt_terms
 LOGGER = logging.getLogger(__name__)
 
 PEXELS_VIDEO_SEARCH_URL = "https://api.pexels.com/v1/videos/search"
-TARGET_FPS = 30
+TARGET_FPS = 24
 MAX_SEGMENT_SECONDS = 8.0
 DEFAULT_ORIENTATION = "portrait"
 ORIENTATION_PRESETS = {
     "portrait": {
         "label": "Portrait (9:16)",
         "pexels": "portrait",
-        "width": 1080,
-        "height": 1920,
+        "width": 720,
+        "height": 1280,
     },
     "landscape": {
         "label": "Landscape (16:9)",
         "pexels": "landscape",
-        "width": 1920,
-        "height": 1080,
+        "width": 1280,
+        "height": 720,
     },
 }
 
@@ -147,7 +148,7 @@ class PexelsClient:
     def _collect_videos(self, keywords, target_duration, request_orientation, preferred_orientation, prompt_terms_set):
         candidates = {}
         failures = []
-        per_page = min(80, max(24, math.ceil(target_duration / 2)))
+        per_page = min(24, max(12, math.ceil(target_duration / 3)))
 
         for keyword in keywords:
             pages = [self.rng.randint(1, 3)]
@@ -276,11 +277,12 @@ class PexelsClient:
             ratio = width / height
             ratio_distance = abs(ratio - target_ratio)
             target_coverage = min(width / target_width, height / target_height)
+            pixel_area = width * height
             return (
                 matches_orientation(item),
                 -ratio_distance,
+                -pixel_area,
                 target_coverage,
-                width * height,
             )
 
         chosen_file = sorted(
@@ -330,6 +332,7 @@ class VideoBuilder:
 
         try:
             selected = self._select_candidates(candidates, duration)
+            LOGGER.info("Low-memory build started for job %s with %s selected clips and target %sx%s", job_id, len(selected), target_size(orientation)[0], target_size(orientation)[1])
             downloaded = self._download_clips(selected, job_temp, progress)
             segments = self._process_segments(downloaded, duration, job_temp, orientation, progress)
             output_path = self.output_dir / f"clipmerge_{job_id}.mp4"
@@ -390,6 +393,7 @@ class VideoBuilder:
             downloaded.append(DownloadedClip(candidate=candidate, path=target))
 
         progress("Downloading clips...", 50)
+        LOGGER.info("Finished clip download phase with %s temporary files in %s", len(downloaded), job_temp)
         return downloaded
 
     def _process_segments(self, downloaded, duration, job_temp, orientation, progress):
@@ -413,6 +417,11 @@ class VideoBuilder:
             self._trim_and_normalize(clip, segment_path, start_at, segment_length, orientation)
             LOGGER.info("Finished segment %s at %s", len(segments) + 1, segment_path)
             segments.append(segment_path)
+            try:
+                clip.path.unlink(missing_ok=True)
+            except OSError as exc:
+                LOGGER.warning("Could not remove temporary source clip %s: %s", clip.path, exc)
+            gc.collect()
             remaining -= segment_length
             clip_index += 1
 
@@ -432,6 +441,9 @@ class VideoBuilder:
         command = [
             self.ffmpeg_path,
             "-y",
+            "-loglevel", "error",
+            "-hide_banner",
+            "-nostdin",
             "-ss", f"{start_at:.3f}",
             "-i", str(clip.path),
             "-t", f"{segment_length:.3f}",
@@ -439,7 +451,9 @@ class VideoBuilder:
             "-an",
             "-c:v", "libx264",
             "-preset", "veryfast",
-            "-crf", "23",
+            "-crf", "24",
+            "-threads", "1",
+            "-pix_fmt", "yuv420p",
             str(target),
         ]
         LOGGER.info("FFmpeg command for clip %s: %s", clip.candidate.video_id, " ".join(command))
@@ -473,13 +487,17 @@ class VideoBuilder:
         command = [
             self.ffmpeg_path,
             "-y",
+            "-loglevel", "error",
+            "-hide_banner",
+            "-nostdin",
             "-f", "concat",
             "-safe", "0",
             "-i", str(concat_file),
             "-t", f"{float(duration):.3f}",
             "-c:v", "libx264",
             "-preset", "veryfast",
-            "-crf", "23",
+            "-crf", "24",
+            "-threads", "1",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             str(output_path),
@@ -490,12 +508,21 @@ class VideoBuilder:
         if not output_path.exists() or output_path.stat().st_size < 1024:
             raise ClipMergeError("The final MP4 could not be created.")
 
+        for path in segments:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                LOGGER.warning("Could not remove temporary segment %s: %s", path, exc)
+        concat_file.unlink(missing_ok=True)
+        gc.collect()
+
     def _run_ffmpeg(self, command, user_message):
         try:
             completed = subprocess.run(
                 command,
                 check=True,
-                capture_output=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=True,
                 timeout=900,
             )
