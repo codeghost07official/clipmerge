@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ClipMerge generated files
+static/temp/*
+static/output/*
+!static/temp/.gitkeep
+!static/output/.gitkeep
