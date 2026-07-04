@@ -3,13 +3,90 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Learn how ClipMerge assembles stock-footage videos from prompts.">
   <title>About ClipMerge</title>
   <link rel="stylesheet" href="about.css">
 </head>
 <body>
-  <main>
-    <h1>About ClipMerge</h1>
-  </main>
+  <div class="page-shell">
+    <header class="site-header" aria-label="Primary navigation">
+      <a class="brand" href="../index.html" aria-label="ClipMerge home">
+        <span class="brand-mark">CM</span>
+        <span>ClipMerge</span>
+      </a>
+
+      <nav class="nav-links">
+        <a href="../index.html">Home</a>
+        <a href="">GitHub</a>
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch theme">
+          <span class="toggle-track" aria-hidden="true">
+            <span class="toggle-thumb"></span>
+          </span>
+          <span class="theme-label" data-theme-label>Dark</span>
+        </button>
+      </nav>
+    </header>
+
+    <main>
+      <section class="about-hero">
+        <p class="eyebrow">About the project</p>
+        <h1>About ClipMerge</h1>
+        <p class="lead">
+          ClipMerge is a frontend-ready video generation workspace for turning a short prompt into a stock-footage video.
+        </p>
+      </section>
+
+      <section class="content-grid" aria-label="ClipMerge overview">
+        <article class="info-card">
+          <span class="card-number">01</span>
+          <h2>What It Does</h2>
+          <p>
+            ClipMerge accepts a video idea, extracts useful search terms, finds matching free stock footage, and prepares a finished MP4 from those clips.
+          </p>
+        </article>
+
+        <article class="info-card">
+          <span class="card-number">02</span>
+          <h2>How It Works</h2>
+          <p>
+            The planned Flask backend will receive the prompt and duration, generate keywords, collect clips, arrange them into a timeline, and return progress updates to the interface.
+          </p>
+        </article>
+
+        <article class="info-card">
+          <span class="card-number">03</span>
+          <h2>Free Stock Footage</h2>
+          <p>
+            The project is designed around freely available stock-footage sources, making it easier to assemble quick concept videos, social clips, and visual drafts automatically.
+          </p>
+        </article>
+      </section>
+
+      <section class="workflow" aria-label="ClipMerge workflow">
+        <div>
+          <p class="eyebrow">Workflow</p>
+          <h2>From prompt to video</h2>
+          <p>
+            The current frontend includes the controls, validation, theme system, status messages, and progress helpers needed for backend integration.
+          </p>
+        </div>
+
+        <ol class="steps">
+          <li>Write a prompt describing the video.</li>
+          <li>Choose the target duration in seconds.</li>
+          <li>Preview the generated video plan.</li>
+          <li>Download the completed MP4 when processing finishes.</li>
+        </ol>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>ClipMerge</span>
+      <a href="">GitHub</a>
+      <span>Copyright 2026 ClipMerge. All rights reserved.</span>
+    </footer>
+  </div>
+
   <script src="about.js"></script>
 </body>
 </html>

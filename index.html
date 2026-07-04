@@ -3,14 +3,84 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="ClipMerge creates stock-footage videos automatically from a prompt.">
   <title>ClipMerge</title>
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="assets/favicon.ico">
 </head>
 <body>
-  <main>
-    <h1>ClipMerge</h1>
-  </main>
+  <div class="app-shell">
+    <header class="site-header" aria-label="Primary navigation">
+      <a class="brand" href="index.html" aria-label="ClipMerge home">
+        <span class="brand-mark">CM</span>
+        <span>ClipMerge</span>
+      </a>
+
+      <nav class="nav-links">
+        <a href="about/about.html">About</a>
+        <a href="" aria-label="ClipMerge GitHub repository">GitHub</a>
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch theme">
+          <span class="toggle-track" aria-hidden="true">
+            <span class="toggle-thumb"></span>
+          </span>
+          <span class="theme-label" data-theme-label>Dark</span>
+        </button>
+      </nav>
+    </header>
+
+    <main class="hero">
+      <section class="generator-panel" aria-labelledby="app-title">
+        <div class="intro">
+          <p class="eyebrow">Prompt to finished footage</p>
+          <h1 id="app-title">ClipMerge</h1>
+          <p class="subtitle">Create stock-footage videos automatically from a prompt.</p>
+        </div>
+
+        <form class="prompt-form" id="clipmerge-form" novalidate>
+          <div class="field-group">
+            <label for="prompt">Video prompt</label>
+            <textarea id="prompt" name="prompt" rows="7" placeholder="Describe the video you want..." required></textarea>
+            <p class="field-error" id="prompt-error" aria-live="polite"></p>
+          </div>
+
+          <div class="field-group compact-field">
+            <label for="duration">Duration</label>
+            <input id="duration" name="duration" type="number" min="1" max="600" inputmode="numeric" placeholder="Video length (seconds)" required>
+            <p class="field-error" id="duration-error" aria-live="polite"></p>
+          </div>
+
+          <div class="button-row">
+            <button class="button button-secondary" type="button" data-action="preview">
+              <span class="button-text">Preview</span>
+              <span class="button-loader" aria-hidden="true"></span>
+            </button>
+            <button class="button button-primary" type="button" data-action="download">
+              <span class="button-text">Download MP4</span>
+              <span class="button-loader" aria-hidden="true"></span>
+            </button>
+          </div>
+        </form>
+
+        <section class="status-panel" aria-label="Generation status">
+          <div class="status-row">
+            <span class="status-dot" aria-hidden="true"></span>
+            <p id="status-message" aria-live="polite">Ready</p>
+          </div>
+
+          <div class="progress-shell" aria-label="Progress">
+            <div class="progress-bar" id="progress-bar" style="width: 0%;"></div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>ClipMerge</span>
+      <a href="">GitHub</a>
+      <span>Copyright 2026 ClipMerge. All rights reserved.</span>
+    </footer>
+  </div>
+
   <script src="script.js"></script>
 </body>
 </html>
