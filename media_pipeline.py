@@ -1,0 +1,499 @@
+import logging
+import math
+import random
+import shutil
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+import requests
+
+from keyword_engine import prompt_terms
+
+
+LOGGER = logging.getLogger(__name__)
+
+PEXELS_VIDEO_SEARCH_URL = "https://api.pexels.com/v1/videos/search"
+TARGET_FPS = 30
+MAX_SEGMENT_SECONDS = 8.0
+DEFAULT_ORIENTATION = "portrait"
+ORIENTATION_PRESETS = {
+    "portrait": {
+        "label": "Portrait (9:16)",
+        "pexels": "portrait",
+        "width": 1080,
+        "height": 1920,
+    },
+    "landscape": {
+        "label": "Landscape (16:9)",
+        "pexels": "landscape",
+        "width": 1920,
+        "height": 1080,
+    },
+}
+
+
+class ClipMergeError(Exception):
+    def __init__(self, message, detail=None):
+        super().__init__(message)
+        self.message = message
+        self.detail = detail
+
+
+def normalize_orientation(value):
+    orientation = str(value or DEFAULT_ORIENTATION).strip().lower()
+    if orientation not in ORIENTATION_PRESETS:
+        raise ClipMergeError("Choose a valid video orientation.")
+    return orientation
+
+
+def orientation_label(orientation):
+    return ORIENTATION_PRESETS[orientation]["label"]
+
+
+def target_size(orientation):
+    preset = ORIENTATION_PRESETS[orientation]
+    return preset["width"], preset["height"]
+
+
+def score_candidate_relevance(candidate_terms, prompt_terms_input, prompt_terms_set=None):
+    prompt_terms_value = prompt_terms_input
+    if isinstance(prompt_terms_input, str):
+        prompt_terms_value = {term for term in prompt_terms_input.split() if term and len(term) > 2}
+    elif prompt_terms_input is None:
+        prompt_terms_value = set()
+    else:
+        prompt_terms_value = {term for term in prompt_terms_input if term}
+
+    if prompt_terms_set is not None:
+        prompt_terms_value = set(prompt_terms_set)
+
+    normalized_prompt_terms = {term.strip("'-").lower() for term in prompt_terms_value}
+    if not normalized_prompt_terms:
+        return 0.0
+
+    normalized_candidate_terms = set()
+    for term in candidate_terms if isinstance(candidate_terms, (list, tuple, set)) else [candidate_terms]:
+        cleaned = str(term).strip("'-").lower()
+        if cleaned:
+            normalized_candidate_terms.add(cleaned)
+
+    overlap = normalized_candidate_terms & normalized_prompt_terms
+    score = len(overlap) * 4.0
+    score += sum(1 for term in normalized_candidate_terms if term in normalized_prompt_terms and len(term) > 3)
+    return score
+
+
+@dataclass(frozen=True)
+class VideoCandidate:
+    video_id: int
+    duration: float
+    download_url: str
+    source_url: str
+    photographer: str
+    query: str
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
+class DownloadedClip:
+    candidate: VideoCandidate
+    path: Path
+
+
+class PexelsClient:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.session = requests.Session()
+        self.session.headers.update({"Authorization": api_key})
+        self.rng = random.SystemRandom()
+
+    def search_videos(self, keywords, target_duration, orientation, prompt=None):
+        orientation = normalize_orientation(orientation)
+        prompt_terms_set = set(prompt_terms(prompt or "")) if prompt else set()
+        requested, failures = self._collect_videos(
+            keywords,
+            target_duration,
+            request_orientation=orientation,
+            preferred_orientation=orientation,
+            prompt_terms_set=prompt_terms_set,
+        )
+
+        if self._has_enough_coverage(requested, target_duration):
+            selected = self._rank_candidates(requested.values(), prompt_terms_set)
+            return selected, False
+
+        fallback, fallback_failures = self._collect_videos(
+            keywords,
+            target_duration,
+            request_orientation=None,
+            preferred_orientation=orientation,
+            prompt_terms_set=prompt_terms_set,
+        )
+        candidates = {**requested, **fallback}
+        failures.extend(fallback_failures)
+
+        if not candidates:
+            detail = "; ".join(failures[-3:]) if failures else None
+            if failures:
+                raise ClipMergeError("Pexels could not return usable video results. Please try again.", detail)
+            raise ClipMergeError("No suitable Pexels videos were found for this prompt.", detail)
+
+        selected = self._rank_candidates(candidates.values(), prompt_terms_set)
+        return selected, True
+
+    def _collect_videos(self, keywords, target_duration, request_orientation, preferred_orientation, prompt_terms_set):
+        candidates = {}
+        failures = []
+        per_page = min(80, max(24, math.ceil(target_duration / 2)))
+
+        for keyword in keywords:
+            pages = [self.rng.randint(1, 3)]
+            if pages[0] != 1:
+                pages.append(1)
+
+            for page in pages:
+                params = {
+                    "query": keyword,
+                    "size": "small",
+                    "per_page": per_page,
+                    "page": page,
+                    "locale": "en-US",
+                }
+                if request_orientation:
+                    params["orientation"] = ORIENTATION_PRESETS[request_orientation]["pexels"]
+
+                LOGGER.debug("Pexels search query=%s orientation=%s page=%s", keyword, request_orientation, page)
+                try:
+                    response = self.session.get(PEXELS_VIDEO_SEARCH_URL, params=params, timeout=20)
+                except requests.RequestException as exc:
+                    failures.append(str(exc))
+                    continue
+
+                if response.status_code in {401, 403}:
+                    raise ClipMergeError("Your Pexels API key was rejected. Check the key in .env.")
+
+                if response.status_code == 429:
+                    raise ClipMergeError("Pexels rate limit reached. Please wait and try again.")
+
+                if not response.ok:
+                    failures.append(f"Pexels returned HTTP {response.status_code} for '{keyword}'.")
+                    continue
+
+                try:
+                    data = response.json()
+                except ValueError:
+                    failures.append(f"Pexels returned an invalid response for '{keyword}'.")
+                    continue
+
+                videos = data.get("videos", [])
+                LOGGER.debug("Pexels returned %s results for %s", len(videos), keyword)
+                for video in videos:
+                    candidate = self._candidate_from_video(video, keyword, preferred_orientation, prompt_terms_set)
+                    if candidate:
+                        candidates[candidate.video_id] = candidate
+
+                if videos:
+                    break
+
+        return candidates, failures
+
+    def _has_enough_coverage(self, candidates, target_duration):
+        covered = 0.0
+        max_clips = min(80, max(3, math.ceil(target_duration / MAX_SEGMENT_SECONDS) + 4))
+
+        for candidate in list(candidates.values())[:max_clips]:
+            covered += min(candidate.duration, MAX_SEGMENT_SECONDS)
+            if covered >= target_duration * 0.8:
+                return True
+
+        return False
+
+    def _rank_candidates(self, candidates, prompt_terms_set):
+        ranked = sorted(candidates, key=lambda item: self._candidate_relevance_score(item, prompt_terms_set), reverse=True)
+        if len(ranked) <= 1:
+            return ranked
+
+        top_candidates = [candidate for candidate in ranked if self._candidate_relevance_score(candidate, prompt_terms_set) > 0]
+        if not top_candidates:
+            top_candidates = ranked
+
+        self.rng.shuffle(top_candidates)
+        if len(top_candidates) > 6:
+            top_candidates = top_candidates[:6]
+        return top_candidates
+
+    def _candidate_relevance_score(self, candidate, prompt_terms_set):
+        if not prompt_terms_set:
+            return 0.0
+
+        candidate_terms = set()
+        for term in candidate.query.split():
+            cleaned = term.strip("'-").lower()
+            if cleaned:
+                candidate_terms.add(cleaned)
+
+        score = score_candidate_relevance(candidate_terms, prompt_terms_set)
+        title_terms = set()
+        for term in (candidate.photographer or "").lower().split():
+            cleaned = term.strip("'-").lower()
+            if cleaned:
+                title_terms.add(cleaned)
+        score += 0.2 * len(title_terms & prompt_terms_set)
+        return score
+
+    def _candidate_from_video(self, video, query, preferred_orientation, prompt_terms_set):
+        video_id = video.get("id")
+        duration = float(video.get("duration") or 0)
+        video_files = video.get("video_files") or []
+
+        if not video_id or duration < 1 or not video_files:
+            return None
+
+        mp4_files = [
+            item for item in video_files
+            if item.get("file_type") == "video/mp4" and item.get("link")
+            and int(item.get("width") or 0) > 0
+            and int(item.get("height") or 0) > 0
+        ]
+
+        if not mp4_files:
+            return None
+
+        target_width, target_height = target_size(preferred_orientation)
+        target_ratio = target_width / target_height
+
+        def matches_orientation(item):
+            width = int(item.get("width") or 0)
+            height = int(item.get("height") or 0)
+            return width < height if preferred_orientation == "portrait" else width >= height
+
+        def file_score(item):
+            width = int(item.get("width") or 0)
+            height = int(item.get("height") or 0)
+            ratio = width / height
+            ratio_distance = abs(ratio - target_ratio)
+            target_coverage = min(width / target_width, height / target_height)
+            return (
+                matches_orientation(item),
+                -ratio_distance,
+                target_coverage,
+                width * height,
+            )
+
+        chosen_file = sorted(
+            mp4_files,
+            key=file_score,
+            reverse=True,
+        )[0]
+        width = int(chosen_file.get("width") or 0)
+        height = int(chosen_file.get("height") or 0)
+
+        candidate = VideoCandidate(
+            video_id=int(video_id),
+            duration=duration,
+            download_url=chosen_file["link"],
+            source_url=video.get("url", ""),
+            photographer=video.get("user", {}).get("name", "Pexels creator"),
+            query=query,
+            width=width,
+            height=height,
+        )
+        relevance = self._candidate_relevance_score(candidate, prompt_terms_set)
+        if relevance > 0:
+            LOGGER.debug("Candidate %s query=%s relevance=%s", candidate.video_id, query, relevance)
+        return candidate
+
+
+class VideoBuilder:
+    def __init__(self, temp_dir, output_dir):
+        self.temp_dir = Path(temp_dir)
+        self.output_dir = Path(output_dir)
+        self.rng = random.SystemRandom()
+        self.ffmpeg_path = shutil.which("ffmpeg")
+
+    @staticmethod
+    def ffmpeg_available():
+        return shutil.which("ffmpeg") is not None
+
+    def build(self, candidates, duration, job_id, orientation, progress: Callable[[str, int], None]):
+        if not self.ffmpeg_path:
+            raise ClipMergeError("FFmpeg is not installed or is not available on PATH.")
+
+        orientation = normalize_orientation(orientation)
+        job_temp = self.temp_dir / job_id
+        job_temp.mkdir(parents=True, exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            selected = self._select_candidates(candidates, duration)
+            downloaded = self._download_clips(selected, job_temp, progress)
+            segments = self._process_segments(downloaded, duration, job_temp, orientation, progress)
+            output_path = self.output_dir / f"clipmerge_{job_id}.mp4"
+            progress("Merging clips...", 86)
+            self._merge_segments(segments, output_path, duration, job_temp)
+            progress("Preparing output...", 96)
+            progress("Finished.", 100)
+            return output_path, selected
+        finally:
+            shutil.rmtree(job_temp, ignore_errors=True)
+
+    def _select_candidates(self, candidates, duration):
+        ranked_candidates = list(candidates)
+        self.rng.shuffle(ranked_candidates)
+        selected = []
+        covered = 0.0
+        max_clips = min(80, max(3, math.ceil(duration / MAX_SEGMENT_SECONDS) + 4))
+
+        for candidate in ranked_candidates:
+            if candidate.video_id in {item.video_id for item in selected}:
+                continue
+            selected.append(candidate)
+            covered += min(candidate.duration, MAX_SEGMENT_SECONDS)
+            if covered >= duration + 0.5 or len(selected) >= max_clips:
+                break
+
+        if covered < duration * 0.8:
+            raise ClipMergeError("Pexels did not return enough usable footage for that duration.")
+
+        LOGGER.debug("Final clip selection: %s", [(item.video_id, item.query) for item in selected])
+        return selected
+
+    def _download_clips(self, candidates, job_temp, progress):
+        downloaded = []
+        total = len(candidates)
+
+        for index, candidate in enumerate(candidates, start=1):
+            progress(f"Downloading clips... ({index}/{total})", 22 + int((index - 1) / total * 28))
+            target = job_temp / f"source_{index:03d}_{candidate.video_id}.mp4"
+
+            try:
+                with requests.get(candidate.download_url, stream=True, timeout=(10, 90)) as response:
+                    response.raise_for_status()
+                    with target.open("wb") as file_handle:
+                        for chunk in response.iter_content(chunk_size=1024 * 512):
+                            if chunk:
+                                file_handle.write(chunk)
+            except requests.RequestException as exc:
+                raise ClipMergeError("A stock clip could not be downloaded. Please try again.", str(exc))
+
+            if target.stat().st_size < 1024:
+                raise ClipMergeError("A downloaded stock clip was empty or invalid.")
+
+            downloaded.append(DownloadedClip(candidate=candidate, path=target))
+
+        progress("Downloading clips...", 50)
+        return downloaded
+
+    def _process_segments(self, downloaded, duration, job_temp, orientation, progress):
+        segments = []
+        remaining = float(duration)
+        clip_index = 0
+        total_expected = max(1, math.ceil(duration / MAX_SEGMENT_SECONDS))
+
+        while remaining > 0.25 and clip_index < len(downloaded) * 2:
+            clip = downloaded[clip_index % len(downloaded)]
+            segment_length = min(MAX_SEGMENT_SECONDS, remaining, max(1.0, clip.candidate.duration))
+            max_start = max(0.0, clip.candidate.duration - segment_length - 0.1)
+            start_at = self.rng.uniform(0, max_start) if max_start > 0 else 0
+            segment_path = job_temp / f"segment_{len(segments) + 1:03d}.mp4"
+
+            progress(
+                f"Processing videos... ({len(segments) + 1}/{total_expected})",
+                min(78, 52 + int(len(segments) / total_expected * 26)),
+            )
+            self._trim_and_normalize(clip, segment_path, start_at, segment_length, orientation)
+            segments.append(segment_path)
+            remaining -= segment_length
+            clip_index += 1
+
+        if not segments:
+            raise ClipMergeError("No clips could be processed into video segments.")
+
+        return segments
+
+    def _trim_and_normalize(self, clip, target, start_at, segment_length, orientation):
+        target_width, target_height = target_size(orientation)
+        video_filter = self._normalization_filter(
+            clip.candidate.width,
+            clip.candidate.height,
+            target_width,
+            target_height,
+        )
+        command = [
+            self.ffmpeg_path,
+            "-y",
+            "-ss", f"{start_at:.3f}",
+            "-i", str(clip.path),
+            "-t", f"{segment_length:.3f}",
+            "-vf", video_filter,
+            "-an",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            str(target),
+        ]
+        self._run_ffmpeg(command, "FFmpeg could not process one of the clips.")
+
+    def _normalization_filter(self, source_width, source_height, target_width, target_height):
+        source_ratio = source_width / source_height if source_width and source_height else target_width / target_height
+        target_ratio = target_width / target_height
+        source_is_landscape = source_ratio >= 1
+        target_is_landscape = target_ratio >= 1
+        ratio_delta = abs(source_ratio - target_ratio) / target_ratio
+
+        if source_is_landscape == target_is_landscape and ratio_delta <= 0.35:
+            return (
+                f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+                f"crop={target_width}:{target_height},fps={TARGET_FPS},"
+                "format=yuv420p,setpts=PTS-STARTPTS"
+            )
+
+        return (
+            f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+            f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,"
+            f"fps={TARGET_FPS},format=yuv420p,setpts=PTS-STARTPTS"
+        )
+
+    def _merge_segments(self, segments, output_path, duration, job_temp):
+        concat_file = job_temp / "concat.txt"
+        concat_lines = [f"file '{path.as_posix()}'" for path in segments]
+        concat_file.write_text("\n".join(concat_lines), encoding="utf-8")
+
+        command = [
+            self.ffmpeg_path,
+            "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(concat_file),
+            "-t", f"{float(duration):.3f}",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+        self._run_ffmpeg(command, "FFmpeg could not merge the processed clips.")
+
+        if not output_path.exists() or output_path.stat().st_size < 1024:
+            raise ClipMergeError("The final MP4 could not be created.")
+
+    def _run_ffmpeg(self, command, user_message):
+        try:
+            completed = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ClipMergeError("FFmpeg took too long while processing the video.", str(exc))
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "").strip()
+            raise ClipMergeError(user_message, detail[-1200:])
+
+        return completed

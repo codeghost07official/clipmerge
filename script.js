@@ -2,12 +2,10 @@
   "use strict";
 
   const THEME_KEY = "clipmerge-theme";
+  const POLL_INTERVAL_MS = 1000;
   const STATUS = {
     ready: "Ready",
-    keywords: "Generating keywords...",
-    clips: "Downloading clips...",
-    merging: "Merging clips...",
-    finished: "Finished"
+    finished: "Finished."
   };
 
   const elements = {
@@ -15,13 +13,17 @@
     form: document.querySelector("#clipmerge-form"),
     prompt: document.querySelector("#prompt"),
     duration: document.querySelector("#duration"),
+    orientation: document.querySelector("#orientation"),
     promptError: document.querySelector("#prompt-error"),
     durationError: document.querySelector("#duration-error"),
     statusMessage: document.querySelector("#status-message"),
     progressBar: document.querySelector("#progress-bar"),
     themeToggle: document.querySelector("[data-theme-toggle]"),
     themeLabel: document.querySelector("[data-theme-label]"),
-    actionButtons: document.querySelectorAll("[data-action]")
+    actionButtons: document.querySelectorAll("[data-action]"),
+    previewPanel: document.querySelector("#preview-panel"),
+    videoPreview: document.querySelector("#video-preview"),
+    previewDownload: document.querySelector("#preview-download")
   };
 
   function getStoredTheme() {
@@ -60,10 +62,40 @@
     setProgress(0);
   }
 
+  function setPreviewOrientation(orientation) {
+    elements.previewPanel.dataset.orientation = orientation || elements.orientation.value || "portrait";
+  }
+
+  function hidePreview() {
+    elements.previewPanel.hidden = true;
+    elements.videoPreview.removeAttribute("src");
+    elements.videoPreview.load();
+    elements.previewDownload.removeAttribute("href");
+    setPreviewOrientation(elements.orientation.value);
+  }
+
+  function showPreview(videoUrl, downloadUrl, orientation) {
+    setPreviewOrientation(orientation);
+    elements.videoPreview.src = videoUrl;
+    elements.previewDownload.href = downloadUrl;
+    elements.previewPanel.hidden = false;
+    elements.videoPreview.load();
+  }
+
+  function triggerDownload(downloadUrl) {
+    const link = document.createElement("a");
+    link.href = downloadUrl;
+    link.download = "";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
   function getFormData() {
     return {
       prompt: elements.prompt.value.trim(),
-      duration: Number(elements.duration.value)
+      duration: Number(elements.duration.value),
+      orientation: elements.orientation.value
     };
   }
 
@@ -103,33 +135,63 @@
     return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
+  async function requestJson(url, options) {
+    const response = await fetch(url, options);
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(data.error || "The server could not complete the request.");
+    }
+
+    return data;
+  }
+
+  async function startGeneration(payload) {
+    return requestJson("/api/generate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async function pollJob(jobId) {
+    while (true) {
+      const job = await requestJson(`/api/status/${jobId}`);
+      setStatus(job.status || STATUS.ready);
+      setProgress(job.progress || 0);
+
+      if (job.state === "finished") {
+        return job;
+      }
+
+      if (job.state === "error") {
+        throw new Error(job.error || "Video generation failed.");
+      }
+
+      await wait(POLL_INTERVAL_MS);
+    }
+  }
+
+  async function generateVideo(payload) {
+    const startedJob = await startGeneration(payload);
+    setStatus(startedJob.status || "Generating keywords...");
+    setProgress(startedJob.progress || 0);
+    return pollJob(startedJob.job_id);
+  }
+
   async function previewVideo(payload) {
-    console.info("Preview API placeholder:", payload);
-    await runPlaceholderFlow();
-    return { ok: true, type: "preview" };
+    const job = await generateVideo(payload);
+    showPreview(job.video_url, job.download_url, job.orientation || payload.orientation);
+    return job;
   }
 
   async function downloadMp4(payload) {
-    console.info("Download API placeholder:", payload);
-    await runPlaceholderFlow();
-    return { ok: true, type: "download" };
-  }
-
-  async function runPlaceholderFlow() {
-    const steps = [
-      [STATUS.keywords, 25],
-      [STATUS.clips, 55],
-      [STATUS.merging, 82],
-      [STATUS.finished, 100]
-    ];
-
-    resetProgress();
-
-    for (const [message, progress] of steps) {
-      setStatus(message);
-      setProgress(progress);
-      await wait(420);
-    }
+    const job = await generateVideo(payload);
+    showPreview(job.video_url, job.download_url, job.orientation || payload.orientation);
+    triggerDownload(job.download_url);
+    return job;
   }
 
   async function handleAction(event) {
@@ -144,20 +206,26 @@
 
     const payload = getFormData();
 
+    hidePreview();
     setAllButtonsDisabled(true);
     setButtonLoading(button, true);
 
     try {
+      let job = null;
+
       if (action === "preview") {
-        await previewVideo(payload);
+        job = await previewVideo(payload);
       }
 
       if (action === "download") {
-        await downloadMp4(payload);
+        job = await downloadMp4(payload);
       }
+
+      setStatus((job && job.status) || STATUS.finished);
+      setProgress(100);
     } catch (error) {
       console.error(error);
-      setStatus("Something went wrong. Try again.");
+      setStatus(error.message || "Something went wrong. Try again.");
     } finally {
       setButtonLoading(button, false);
       setAllButtonsDisabled(false);
@@ -177,6 +245,7 @@
     elements.actionButtons.forEach((button) => button.addEventListener("click", handleAction));
     elements.prompt.addEventListener("input", validateInputs);
     elements.duration.addEventListener("input", validateInputs);
+    elements.orientation.addEventListener("change", hidePreview);
   }
 
   function init() {

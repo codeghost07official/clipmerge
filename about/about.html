@@ -49,7 +49,7 @@
           <span class="card-number">02</span>
           <h2>How It Works</h2>
           <p>
-            The planned Flask backend will receive the prompt and duration, generate keywords, collect clips, arrange them into a timeline, and return progress updates to the interface.
+            The Flask backend receives the prompt and duration, generates keywords locally, collects clips from Pexels, arranges them into a timeline, and returns progress updates to the interface.
           </p>
         </article>
 
@@ -57,7 +57,7 @@
           <span class="card-number">03</span>
           <h2>Free Stock Footage</h2>
           <p>
-            The project is designed around freely available stock-footage sources, making it easier to assemble quick concept videos, social clips, and visual drafts automatically.
+            ClipMerge uses real stock footage from the Pexels library, so results depend on the availability and relevance of those clips. Highly specific, fictional, or rare scenes may not match perfectly, while more descriptive and realistic prompts generally produce better results.
           </p>
         </article>
       </section>
@@ -67,7 +67,7 @@
           <p class="eyebrow">Workflow</p>
           <h2>From prompt to video</h2>
           <p>
-            The current frontend includes the controls, validation, theme system, status messages, and progress helpers needed for backend integration.
+            The interface connects directly to the generation API, showing live status updates while ClipMerge downloads, processes, merges, previews, and serves the finished MP4.
           </p>
         </div>
 
@@ -83,6 +83,7 @@
     <footer class="site-footer">
       <span>ClipMerge</span>
       <a href="">GitHub</a>
+      <a href="https://www.pexels.com" target="_blank" rel="noreferrer">Videos provided by Pexels</a>
       <span>Copyright 2026 ClipMerge. All rights reserved.</span>
     </footer>
   </div>

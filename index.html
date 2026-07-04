@@ -49,6 +49,14 @@
             <p class="field-error" id="duration-error" aria-live="polite"></p>
           </div>
 
+          <div class="field-group compact-field">
+            <label for="orientation">Orientation</label>
+            <select id="orientation" name="orientation">
+              <option value="portrait" selected>Portrait (9:16)</option>
+              <option value="landscape">Landscape (16:9)</option>
+            </select>
+          </div>
+
           <div class="button-row">
             <button class="button button-secondary" type="button" data-action="preview">
               <span class="button-text">Preview</span>
@@ -71,12 +79,20 @@
             <div class="progress-bar" id="progress-bar" style="width: 0%;"></div>
           </div>
         </section>
+
+        <section class="preview-panel" id="preview-panel" aria-label="Generated video preview" hidden>
+          <video id="video-preview" controls playsinline preload="metadata"></video>
+          <div class="preview-actions">
+            <a class="button button-secondary preview-download" id="preview-download" href="" download>Download MP4</a>
+          </div>
+        </section>
       </section>
     </main>
 
     <footer class="site-footer">
       <span>ClipMerge</span>
       <a href="">GitHub</a>
+      <a href="https://www.pexels.com" target="_blank" rel="noreferrer">Videos provided by Pexels</a>
       <span>Copyright 2026 ClipMerge. All rights reserved.</span>
     </footer>
   </div>
