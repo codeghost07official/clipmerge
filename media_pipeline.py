@@ -334,10 +334,9 @@ class VideoBuilder:
             selected = self._select_candidates(candidates, duration)
             LOGGER.info("Low-memory build started for job %s with %s selected clips and target %sx%s", job_id, len(selected), target_size(orientation)[0], target_size(orientation)[1])
             downloaded = self._download_clips(selected, job_temp, progress)
-            segments = self._process_segments(downloaded, duration, job_temp, orientation, progress)
             output_path = self.output_dir / f"clipmerge_{job_id}.mp4"
-            progress("Merging clips...", 86)
-            self._merge_segments(segments, output_path, duration, job_temp)
+            progress("Processing videos...", 60)
+            self._assemble_video(downloaded, output_path, duration, orientation, job_temp, progress)
             progress("Preparing output...", 96)
             progress("Finished.", 100)
             return output_path, selected
@@ -396,7 +395,66 @@ class VideoBuilder:
         LOGGER.info("Finished clip download phase with %s temporary files in %s", len(downloaded), job_temp)
         return downloaded
 
-    def _process_segments(self, downloaded, duration, job_temp, orientation, progress):
+    def _assemble_video(self, downloaded, output_path, duration, orientation, job_temp, progress):
+        segments = self._build_segments(downloaded, duration, progress)
+        if not segments:
+            raise ClipMergeError("No clips could be processed into video segments.")
+
+        target_width, target_height = target_size(orientation)
+        command = [
+            self.ffmpeg_path,
+            "-y",
+            "-loglevel", "error",
+            "-hide_banner",
+            "-nostdin",
+        ]
+
+        for segment in segments:
+            command.extend(["-i", str(segment["clip"].path)])
+
+        filter_parts = []
+        for index, segment in enumerate(segments):
+            source_width = segment["clip"].candidate.width
+            source_height = segment["clip"].candidate.height
+            filter_parts.append(
+                f"[{index}:v]{self._segment_filter(source_width, source_height, target_width, target_height, segment['start_at'], segment['length'])}[v{index}]"
+            )
+
+        if len(segments) == 1:
+            filter_complex = filter_parts[0]
+            output_label = "v0"
+        else:
+            concat_inputs = "".join(f"[v{index}]" for index in range(len(segments)))
+            filter_complex = ";".join(filter_parts) + f";{concat_inputs}concat=n={len(segments)}:v=1:a=0[v]"
+            output_label = "v"
+
+        command.extend([
+            "-filter_complex", filter_complex,
+            "-map", f"[{output_label}]",
+            "-an",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "24",
+            "-threads", "0",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            str(output_path),
+        ])
+
+        LOGGER.info("FFmpeg single-pass command for %s segments: %s", len(segments), " ".join(command))
+        self._run_ffmpeg(command, "FFmpeg could not process the clips.")
+
+        if not output_path.exists() or output_path.stat().st_size < 1024:
+            raise ClipMergeError("The final MP4 could not be created.")
+
+        for segment in segments:
+            try:
+                segment["clip"].path.unlink(missing_ok=True)
+            except OSError as exc:
+                LOGGER.warning("Could not remove temporary source clip %s: %s", segment["clip"].path, exc)
+        gc.collect()
+
+    def _build_segments(self, downloaded, duration, progress):
         segments = []
         remaining = float(duration)
         clip_index = 0
@@ -407,57 +465,20 @@ class VideoBuilder:
             segment_length = min(MAX_SEGMENT_SECONDS, remaining, max(1.0, clip.candidate.duration))
             max_start = max(0.0, clip.candidate.duration - segment_length - 0.1)
             start_at = self.rng.uniform(0, max_start) if max_start > 0 else 0
-            segment_path = job_temp / f"segment_{len(segments) + 1:03d}.mp4"
-
             progress(
                 f"Processing videos... ({len(segments) + 1}/{total_expected})",
                 min(78, 52 + int(len(segments) / total_expected * 26)),
             )
             LOGGER.info("Processing segment %s for clip %s from %.3f for %.3f seconds", len(segments) + 1, clip.candidate.video_id, start_at, segment_length)
-            self._trim_and_normalize(clip, segment_path, start_at, segment_length, orientation)
-            LOGGER.info("Finished segment %s at %s", len(segments) + 1, segment_path)
-            segments.append(segment_path)
-            try:
-                clip.path.unlink(missing_ok=True)
-            except OSError as exc:
-                LOGGER.warning("Could not remove temporary source clip %s: %s", clip.path, exc)
-            gc.collect()
+            segments.append({"clip": clip, "start_at": start_at, "length": segment_length})
             remaining -= segment_length
             clip_index += 1
 
-        if not segments:
-            raise ClipMergeError("No clips could be processed into video segments.")
-
         return segments
 
-    def _trim_and_normalize(self, clip, target, start_at, segment_length, orientation):
-        target_width, target_height = target_size(orientation)
-        video_filter = self._normalization_filter(
-            clip.candidate.width,
-            clip.candidate.height,
-            target_width,
-            target_height,
-        )
-        command = [
-            self.ffmpeg_path,
-            "-y",
-            "-loglevel", "error",
-            "-hide_banner",
-            "-nostdin",
-            "-ss", f"{start_at:.3f}",
-            "-i", str(clip.path),
-            "-t", f"{segment_length:.3f}",
-            "-vf", video_filter,
-            "-an",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "24",
-            "-threads", "1",
-            "-pix_fmt", "yuv420p",
-            str(target),
-        ]
-        LOGGER.info("FFmpeg command for clip %s: %s", clip.candidate.video_id, " ".join(command))
-        self._run_ffmpeg(command, "FFmpeg could not process one of the clips.")
+    def _segment_filter(self, source_width, source_height, target_width, target_height, start_at, segment_length):
+        base_filter = self._normalization_filter(source_width, source_height, target_width, target_height)
+        return f"trim=start={start_at:.3f}:duration={segment_length:.3f},setpts=PTS-STARTPTS,{base_filter}"
 
     def _normalization_filter(self, source_width, source_height, target_width, target_height):
         source_ratio = source_width / source_height if source_width and source_height else target_width / target_height
@@ -470,51 +491,14 @@ class VideoBuilder:
             return (
                 f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
                 f"crop={target_width}:{target_height},fps={TARGET_FPS},"
-                "format=yuv420p,setpts=PTS-STARTPTS"
+                "format=yuv420p"
             )
 
         return (
             f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
             f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,"
-            f"fps={TARGET_FPS},format=yuv420p,setpts=PTS-STARTPTS"
+            f"fps={TARGET_FPS},format=yuv420p"
         )
-
-    def _merge_segments(self, segments, output_path, duration, job_temp):
-        concat_file = job_temp / "concat.txt"
-        concat_lines = [f"file '{path.as_posix()}'" for path in segments]
-        concat_file.write_text("\n".join(concat_lines), encoding="utf-8")
-
-        command = [
-            self.ffmpeg_path,
-            "-y",
-            "-loglevel", "error",
-            "-hide_banner",
-            "-nostdin",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_file),
-            "-t", f"{float(duration):.3f}",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "24",
-            "-threads", "1",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            str(output_path),
-        ]
-        LOGGER.info("FFmpeg merge command: %s", " ".join(command))
-        self._run_ffmpeg(command, "FFmpeg could not merge the processed clips.")
-
-        if not output_path.exists() or output_path.stat().st_size < 1024:
-            raise ClipMergeError("The final MP4 could not be created.")
-
-        for path in segments:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError as exc:
-                LOGGER.warning("Could not remove temporary segment %s: %s", path, exc)
-        concat_file.unlink(missing_ok=True)
-        gc.collect()
 
     def _run_ffmpeg(self, command, user_message):
         try:
