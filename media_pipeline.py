@@ -189,7 +189,7 @@ class PexelsClient:
                     continue
 
                 videos = data.get("videos", [])
-                LOGGER.debug("Pexels returned %s results for %s", len(videos), keyword)
+                LOGGER.info("Pexels query=%s page=%s returned %s results", keyword, page, len(videos))
                 for video in videos:
                     candidate = self._candidate_from_video(video, keyword, preferred_orientation, prompt_terms_set)
                     if candidate:
@@ -288,6 +288,7 @@ class PexelsClient:
             key=file_score,
             reverse=True,
         )[0]
+        LOGGER.info("Selected file for video %s: width=%s height=%s url=%s", video_id, chosen_file.get("width"), chosen_file.get("height"), chosen_file.get("link"))
         width = int(chosen_file.get("width") or 0)
         height = int(chosen_file.get("height") or 0)
 
@@ -370,16 +371,20 @@ class VideoBuilder:
             target = job_temp / f"source_{index:03d}_{candidate.video_id}.mp4"
 
             try:
+                LOGGER.info("Downloading clip %s/%s for video %s from %s", index, total, candidate.video_id, candidate.download_url)
                 with requests.get(candidate.download_url, stream=True, timeout=(10, 90)) as response:
                     response.raise_for_status()
                     with target.open("wb") as file_handle:
                         for chunk in response.iter_content(chunk_size=1024 * 512):
                             if chunk:
                                 file_handle.write(chunk)
+                LOGGER.info("Saved clip %s/%s to %s (%s bytes)", index, total, target, target.stat().st_size)
             except requests.RequestException as exc:
+                LOGGER.exception("Clip download failed for video %s", candidate.video_id)
                 raise ClipMergeError("A stock clip could not be downloaded. Please try again.", str(exc))
 
             if target.stat().st_size < 1024:
+                LOGGER.error("Downloaded clip %s was empty or invalid at %s", candidate.video_id, target)
                 raise ClipMergeError("A downloaded stock clip was empty or invalid.")
 
             downloaded.append(DownloadedClip(candidate=candidate, path=target))
@@ -404,7 +409,9 @@ class VideoBuilder:
                 f"Processing videos... ({len(segments) + 1}/{total_expected})",
                 min(78, 52 + int(len(segments) / total_expected * 26)),
             )
+            LOGGER.info("Processing segment %s for clip %s from %.3f for %.3f seconds", len(segments) + 1, clip.candidate.video_id, start_at, segment_length)
             self._trim_and_normalize(clip, segment_path, start_at, segment_length, orientation)
+            LOGGER.info("Finished segment %s at %s", len(segments) + 1, segment_path)
             segments.append(segment_path)
             remaining -= segment_length
             clip_index += 1
@@ -435,6 +442,7 @@ class VideoBuilder:
             "-crf", "23",
             str(target),
         ]
+        LOGGER.info("FFmpeg command for clip %s: %s", clip.candidate.video_id, " ".join(command))
         self._run_ffmpeg(command, "FFmpeg could not process one of the clips.")
 
     def _normalization_filter(self, source_width, source_height, target_width, target_height):
@@ -476,6 +484,7 @@ class VideoBuilder:
             "-movflags", "+faststart",
             str(output_path),
         ]
+        LOGGER.info("FFmpeg merge command: %s", " ".join(command))
         self._run_ffmpeg(command, "FFmpeg could not merge the processed clips.")
 
         if not output_path.exists() or output_path.stat().st_size < 1024:
@@ -491,9 +500,11 @@ class VideoBuilder:
                 timeout=900,
             )
         except subprocess.TimeoutExpired as exc:
+            LOGGER.exception("FFmpeg timed out while running command: %s", command)
             raise ClipMergeError("FFmpeg took too long while processing the video.", str(exc))
         except subprocess.CalledProcessError as exc:
             detail = (exc.stderr or exc.stdout or "").strip()
+            LOGGER.exception("FFmpeg command failed: %s\n%s", command, detail[-1200:])
             raise ClipMergeError(user_message, detail[-1200:])
 
         return completed

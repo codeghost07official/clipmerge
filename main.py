@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import threading
 import time
 import uuid
@@ -27,11 +28,15 @@ ENV_PATH = BASE_DIR / ".env"
 load_dotenv(ENV_PATH)
 
 if os.getenv("CLIPMERGE_DEBUG", "").lower() in {"1", "true", "yes", "on"}:
-    logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(name)s:%(message)s")
+    log_level = logging.DEBUG
 else:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
+    log_level = logging.INFO
+
+logging.basicConfig(level=log_level, format="%(levelname)s:%(name)s:%(message)s", stream=sys.stdout, force=True)
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+app.logger.setLevel(log_level)
+app.logger.propagate = True
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
@@ -50,9 +55,11 @@ def update_job(job_id, **changes):
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
+            app.logger.warning("Attempted to update missing job %s with %s", job_id, changes)
             return
         job.update(changes)
         job["updated_at"] = time.time()
+        app.logger.info("Updated job %s: %s", job_id, {key: job.get(key) for key in ("state", "status", "progress", "error") if key in job})
 
 
 def public_job(job):
@@ -91,17 +98,21 @@ def validate_payload(data):
 
 
 def run_generation_job(job_id, prompt, duration, orientation):
+    app.logger.info("Starting background generation job %s for prompt=%r duration=%s orientation=%s", job_id, prompt, duration, orientation)
     try:
         def progress(message, value):
             update_job(job_id, status=message, progress=max(0, min(100, int(value))))
 
         progress("Generating keywords...", 6)
         keywords = generate_keywords(prompt)
+        app.logger.info("Job %s generated keywords: %s", job_id, keywords)
         update_job(job_id, keywords=keywords)
 
         progress("Searching Pexels...", 14)
         pexels = PexelsClient(api_key())
+        app.logger.info("Job %s searching Pexels with %s queries", job_id, len(keywords))
         candidates, fallback_used = pexels.search_videos(keywords, duration, orientation, prompt=prompt)
+        app.logger.info("Job %s received %s candidates (fallback_used=%s)", job_id, len(candidates), fallback_used)
         update_job(job_id, fallback_used=fallback_used)
         fallback_notice = ""
         if fallback_used:
@@ -113,7 +124,9 @@ def run_generation_job(job_id, prompt, duration, orientation):
 
         progress("Downloading clips...", 22)
         builder = VideoBuilder(TEMP_DIR, OUTPUT_DIR)
+        app.logger.info("Job %s starting clip download/build pipeline with %s candidates", job_id, len(candidates))
         output_path, selected = builder.build(candidates, duration, job_id, orientation, progress)
+        app.logger.info("Job %s finished build: output=%s selected=%s", job_id, output_path, [(item.video_id, item.query) for item in selected])
 
         video_url = f"/static/output/{output_path.name}?v={int(time.time())}"
         download_url = f"/api/download/{job_id}"
@@ -140,6 +153,7 @@ def run_generation_job(job_id, prompt, duration, orientation):
             output_path=str(output_path),
             sources=sources,
         )
+        app.logger.info("Job %s finished successfully", job_id)
     except ClipMergeError as exc:
         app.logger.exception("Generation job %s failed with ClipMergeError", job_id)
         update_job(
@@ -169,6 +183,8 @@ def cleanup_old_jobs(max_age_seconds=6 * 60 * 60):
         ]
         for job_id in stale_ids:
             jobs.pop(job_id, None)
+        if stale_ids:
+            app.logger.info("Cleaned up stale jobs: %s", stale_ids)
 
 
 @app.route("/")
@@ -240,6 +256,7 @@ def generate():
         with jobs_lock:
             jobs[job_id] = job
 
+        app.logger.info("Created job %s with initial state=%s status=%s", job_id, job["state"], job["status"])
         thread = threading.Thread(
             target=run_generation_job,
             args=(job_id, prompt, duration, orientation),
@@ -259,6 +276,7 @@ def job_status(job_id):
         with jobs_lock:
             job = jobs.get(job_id)
 
+        app.logger.info("Status request for job %s -> %s", job_id, job.get("state") if job else "missing")
         if not job:
             return jsonify({"error": "Generation job was not found."}), 404
 
