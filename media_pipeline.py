@@ -148,13 +148,10 @@ class PexelsClient:
     def _collect_videos(self, keywords, target_duration, request_orientation, preferred_orientation, prompt_terms_set):
         candidates = {}
         failures = []
-        per_page = min(24, max(12, math.ceil(target_duration / 3)))
+        per_page = min(10, max(8, math.ceil(target_duration / 4)))
 
         for keyword in keywords:
-            pages = [self.rng.randint(1, 3)]
-            if pages[0] != 1:
-                pages.append(1)
-
+            pages = [1]
             for page in pages:
                 params = {
                     "query": keyword,
@@ -190,22 +187,22 @@ class PexelsClient:
                     continue
 
                 videos = data.get("videos", [])
-                LOGGER.info("Pexels query=%s page=%s returned %s results", keyword, page, len(videos))
+                LOGGER.info("Pexels query=%s returned %s results", keyword, len(videos))
                 for video in videos:
                     candidate = self._candidate_from_video(video, keyword, preferred_orientation, prompt_terms_set)
                     if candidate:
                         candidates[candidate.video_id] = candidate
 
-                if videos:
+                if len(candidates) >= per_page * 2:
                     break
 
         return candidates, failures
 
     def _has_enough_coverage(self, candidates, target_duration):
         covered = 0.0
-        max_clips = min(80, max(3, math.ceil(target_duration / MAX_SEGMENT_SECONDS) + 4))
+        max_clips_to_check = min(40, max(3, math.ceil(target_duration / MAX_SEGMENT_SECONDS) + 2))
 
-        for candidate in list(candidates.values())[:max_clips]:
+        for candidate in list(candidates.values())[:max_clips_to_check]:
             covered += min(candidate.duration, MAX_SEGMENT_SECONDS)
             if covered >= target_duration * 0.8:
                 return True
@@ -348,20 +345,25 @@ class VideoBuilder:
         self.rng.shuffle(ranked_candidates)
         selected = []
         covered = 0.0
-        max_clips = min(80, max(3, math.ceil(duration / MAX_SEGMENT_SECONDS) + 4))
+        max_clips = min(40, max(3, math.ceil(duration / MAX_SEGMENT_SECONDS) + 2))
 
+        selected_ids = set()
         for candidate in ranked_candidates:
-            if candidate.video_id in {item.video_id for item in selected}:
+            if candidate.video_id in selected_ids:
                 continue
             selected.append(candidate)
-            covered += min(candidate.duration, MAX_SEGMENT_SECONDS)
-            if covered >= duration + 0.5 or len(selected) >= max_clips:
+            selected_ids.add(candidate.video_id)
+            segment_duration = min(candidate.duration, MAX_SEGMENT_SECONDS)
+            covered += segment_duration
+            if covered >= duration or len(selected) >= max_clips:
                 break
 
-        if covered < duration * 0.8:
+        if covered < duration * 0.75:
             raise ClipMergeError("Pexels did not return enough usable footage for that duration.")
 
-        LOGGER.debug("Final clip selection: %s", [(item.video_id, item.query) for item in selected])
+        LOGGER.info("Selected %s clips with %.1f seconds coverage for %.1f second target", len(selected), covered, duration)
+        del selected_ids
+        del ranked_candidates
         return selected
 
     def _download_clips(self, candidates, job_temp, progress):
@@ -433,8 +435,8 @@ class VideoBuilder:
             "-map", f"[{output_label}]",
             "-an",
             "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "24",
+            "-preset", "fast",
+            "-crf", "26",
             "-threads", "0",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
@@ -452,6 +454,8 @@ class VideoBuilder:
                 segment["clip"].path.unlink(missing_ok=True)
             except OSError as exc:
                 LOGGER.warning("Could not remove temporary source clip %s: %s", segment["clip"].path, exc)
+        del segments
+        gc.collect()
         gc.collect()
 
     def _build_segments(self, downloaded, duration, progress):
@@ -459,9 +463,10 @@ class VideoBuilder:
         remaining = float(duration)
         clip_index = 0
         total_expected = max(1, math.ceil(duration / MAX_SEGMENT_SECONDS))
+        num_clips = len(downloaded)
 
-        while remaining > 0.25 and clip_index < len(downloaded) * 2:
-            clip = downloaded[clip_index % len(downloaded)]
+        while remaining > 0.25 and clip_index < num_clips * 1.5:
+            clip = downloaded[clip_index % num_clips]
             segment_length = min(MAX_SEGMENT_SECONDS, remaining, max(1.0, clip.candidate.duration))
             max_start = max(0.0, clip.candidate.duration - segment_length - 0.1)
             start_at = self.rng.uniform(0, max_start) if max_start > 0 else 0
@@ -469,7 +474,7 @@ class VideoBuilder:
                 f"Processing videos... ({len(segments) + 1}/{total_expected})",
                 min(78, 52 + int(len(segments) / total_expected * 26)),
             )
-            LOGGER.info("Processing segment %s for clip %s from %.3f for %.3f seconds", len(segments) + 1, clip.candidate.video_id, start_at, segment_length)
+            LOGGER.info("Segment %s: clip_id=%s start=%.3fs length=%.3fs", len(segments) + 1, clip.candidate.video_id, start_at, segment_length)
             segments.append({"clip": clip, "start_at": start_at, "length": segment_length})
             remaining -= segment_length
             clip_index += 1

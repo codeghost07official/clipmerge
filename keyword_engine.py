@@ -1,7 +1,6 @@
 import logging
 import random
 import re
-from collections import Counter
 
 
 LOGGER = logging.getLogger(__name__)
@@ -70,13 +69,12 @@ def tokenize(prompt):
 def important_terms(prompt):
     words = [word.strip("-'") for word in tokenize(prompt)]
     words = [word for word in words if word and word not in STOP_WORDS and word not in RELEVANCE_STOP_WORDS and len(word) > 2]
-    counts = Counter(words)
-    return [word for word, _count in counts.most_common()]
+    return [word for word in dict.fromkeys(words)]
 
 
 def prompt_terms(prompt):
     terms = [word for word in tokenize(prompt) if word and word not in STOP_WORDS and word not in RELEVANCE_STOP_WORDS and len(word) > 2]
-    return [word for word, _count in Counter(terms).most_common()]
+    return [word for word in dict.fromkeys(terms)]
 
 
 def build_search_queries(prompt, max_keywords=12):

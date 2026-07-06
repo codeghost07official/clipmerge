@@ -174,7 +174,7 @@ def run_generation_job(job_id, prompt, duration, orientation):
         )
 
 
-def cleanup_old_jobs(max_age_seconds=6 * 60 * 60):
+def cleanup_old_jobs(max_age_seconds=1 * 60 * 60):
     now = time.time()
     with jobs_lock:
         stale_ids = [
@@ -184,7 +184,7 @@ def cleanup_old_jobs(max_age_seconds=6 * 60 * 60):
         for job_id in stale_ids:
             jobs.pop(job_id, None)
         if stale_ids:
-            app.logger.info("Cleaned up stale jobs: %s", stale_ids)
+            app.logger.info("Cleaned up %s stale jobs", len(stale_ids))
 
 
 @app.route("/")
